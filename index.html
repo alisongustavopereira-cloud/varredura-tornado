@@ -1108,13 +1108,16 @@ function renderList() {
 $('list').addEventListener('click', e => { const b = e.target.closest('button.st'); if (b) setStatus(b.dataset.id, b.dataset.next); });
 
 /* ---------- mapa ---------- */
-let map, heat, ptsLayer, quadLayer;
+let map, heat, ptsLayer, quadLayer, mapReady = () => false;
 function initMap() {
   if (!window.L) { $('map').innerHTML = '<p class="empty" style="padding:24px">O mapa não carregou neste aparelho. A lista abaixo funciona normalmente.</p>'; return; }
   map = L.map('map', {scrollWheelZoom:false, zoomControl:true}).setView(D.centro, 13);
   L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {maxZoom:19, attribution:'© colaboradores do OpenStreetMap'}).addTo(map);
   map.on('click', () => map.scrollWheelZoom.enable());
-  heat = L.heatLayer([], {radius:34, blur:26, maxZoom:12, max:3, minOpacity:.35, gradient:{.25:'#3b7dd8', .5:'#39b54a', .7:'#f2e205', .85:'#f28c05', 1:'#d7191c'}}).addTo(map);
+  heat = L.heatLayer([], {radius:34, blur:26, maxZoom:12, max:3, minOpacity:.35, gradient:{.25:'#3b7dd8', .5:'#39b54a', .7:'#f2e205', .85:'#f28c05', 1:'#d7191c'}});
+  // O plugin de calor falha se o mapa estiver com tamanho zero (aba ou painel ainda oculto): so desenha com tamanho real.
+  const redraw0 = heat._redraw;
+  heat._redraw = function () { const z = this._map && this._map.getSize(); if (!z || !z.x || !z.y) return; return redraw0.apply(this, arguments); };
   ptsLayer = L.layerGroup().addTo(map);
   const [clat, clon] = D.centro, dash = {color:'#1f2428', weight:2, opacity:.6, dashArray:'6 8', interactive:false};
   quadLayer = L.layerGroup([
@@ -1123,13 +1126,23 @@ function initMap() {
       L.marker([clat, clon], {interactive:false, keyboard:false, icon:L.divIcon({className:'', html:`<span class="qlabel ${t}">${t}</span>`, iconSize:[0, 0]})}))
   ]).addTo(map);
   const all = P.filter(p => p.mlat != null).map(p => [p.mlat, p.mlon]);
-  if (all.length) map.fitBounds(all, {padding:[18, 18]});
-  const fitHeat = () => { const z = map.getZoom(), r = z >= 14 ? 34 : z === 13 ? 28 : 22; heat.setOptions({radius:r, blur:Math.round(r * .75)}); };
-  map.on('zoomend', fitHeat); fitHeat();
+  let fitted = false;
+  const ready = () => {
+    const z = map.getSize(); if (!z.x || !z.y) return false;
+    if (!fitted && all.length) { fitted = true; map.fitBounds(all, {padding:[18, 18]}); }
+    if (!map.hasLayer(heat)) heat.addTo(map);
+    return true;
+  };
+  const fitHeat = () => { if (!map.hasLayer(heat)) return; const z = map.getZoom(), r = z >= 14 ? 34 : z === 13 ? 28 : 22; heat.setOptions({radius:r, blur:Math.round(r * .75)}); };
+  map.on('zoomend', fitHeat);
+  map.on('resize', () => { if (ready()) { fitHeat(); renderMap(); } });
+  mapReady = ready;
+  if (ready()) fitHeat();
   map.on('popupopen', e => { const n = e.popup.getElement(); if (n) n.onclick = ev => { const b = ev.target.closest('button[data-id]'); if (b) { map.closePopup(); setStatus(b.dataset.id, b.dataset.next); } }; });
 }
 function renderMap() {
   if (!map) return;
+  mapReady();
   const vis = P.filter(p => match(p) && p.mlat != null);
   const hp = vis.filter(p => heatMode === 'all' || !isDone(p)).map(p => [p.mlat, p.mlon, Math.min(3, p.nb + p.nl)]);
   heat.setLatLngs(hp);
@@ -1161,11 +1174,15 @@ function renderSync() {
   else { el.className = 'sync err'; el.textContent = 'Sem conexão com o servidor de status'; }
   $('btnLogin').textContent = AUTH ? 'Sair (' + AUTH.nome.split(/[ ,]/)[0] + ')' : 'Editar status';
 }
-function renderAll() { renderSync(); renderDash(); renderList(); renderMap(); }
+function safe(fn, what) { try { fn(); } catch (e) { console.error('Falha em ' + what + ':', e); } }
+function renderAll() { safe(renderSync, 'status'); safe(renderDash, 'painel'); safe(renderList, 'lista'); safe(renderMap, 'mapa'); }
 let toastT; function toast(m) { const t = $('toast'); t.textContent = m; t.hidden = false; clearTimeout(toastT); toastT = setTimeout(() => { t.hidden = true; }, 4200); }
 
 $('foot').textContent = `${P.length} pontos de atendimento, consolidados de ${D.demandas} demandas do Despacho SEI ${D.sei}. Dados gerados em ${D.gerado}.`;
-readHash(); syncControls(); initMap(); renderAll();
+readHash(); syncControls();
+try { initMap(); } catch (e) { console.error('Falha ao iniciar o mapa:', e); map = null; $('map').innerHTML = '<p class="empty" style="padding:24px">O mapa não carregou neste aparelho. O painel e a lista funcionam normalmente.</p>'; }
+renderAll();
+new ResizeObserver(() => { if (map) map.invalidateSize(); }).observe($('map'));
 const setTop = () => document.documentElement.style.setProperty('--toph', document.querySelector('.top').offsetHeight + 'px');
 setTop(); window.addEventListener('resize', setTop);
 document.querySelectorAll('a[data-go]').forEach(a => a.onclick = e => { e.preventDefault(); $(a.dataset.go).scrollIntoView({behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth'}); });
